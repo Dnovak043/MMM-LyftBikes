@@ -1,0 +1,61 @@
+/* Layout modelled on MMM-Bubi (https://github.com/balassy/MMM-Bubi) */
+
+.MMM-LyftBikes table {
+	width: auto !important;
+	line-height: 20px;
+}
+
+.MMM-LyftBikes table.align-right {
+	margin-left: auto;
+}
+
+.MMM-LyftBikes .clearfix::after {
+	content: "";
+	clear: both;
+	display: table;
+}
+
+.MMM-LyftBikes .symbol-cell,
+.MMM-LyftBikes .space-cell,
+.MMM-LyftBikes .count-cell {
+	padding-right: 8px; /* gap between columns */
+	text-align: right;
+}
+
+.MMM-LyftBikes .symbol-cell {
+	padding-top: 3px;
+}
+
+.MMM-LyftBikes .symbol-dock-cell {
+	padding-top: 5px;
+	padding-right: 4px;
+}
+
+.MMM-LyftBikes .name-cell {
+	text-align: left;
+	white-space: nowrap;
+}
+
+/* Station not renting right now */
+.MMM-LyftBikes tr.lb-offline {
+	opacity: 0.4;
+}
+
+/* Per-number transition when a value changes */
+.MMM-LyftBikes .count-cell {
+	transition: opacity 0.4s ease;
+}
+
+.MMM-LyftBikes .count-cell.lb-changing {
+	opacity: 0;
+}
+
+/* Divider between groups (e.g. start station vs. destinations) */
+.MMM-LyftBikes table.lb-group + table.lb-group {
+	margin-top: 8px;
+	border-top: 1px solid #333;
+}
+
+.MMM-LyftBikes table.lb-group + table.lb-group tr:first-child td {
+	padding-top: 8px;
+}
