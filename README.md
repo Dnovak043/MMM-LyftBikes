@@ -81,13 +81,12 @@ Consecutive stations that show the same values form a **group** with its own col
 
 Add [MMM-MirrorMap](https://github.com/Dnovak043/MMM-MirrorMap) to your config with `layers: ["lyft"]`. This module answers it automatically with a Lyft-style pin for every station in that map's area — no extra Lyft requests, since it reuses the station data it already downloads. Each map can have its own area and zoom; each gets just the stations it shows.
 
-To make the map take turns with this list, give this module a class and point the map at it:
+For example:
 
 ```js
-{ module: "MMM-LyftBikes", position: "top_left", classes: "lyft-group", config: { stationName: "Your Station Name" } },
+{ module: "MMM-LyftBikes", position: "top_left", config: { stationName: "Your Station Name" } },
 { module: "MMM-MirrorMap", position: "top_left", config: {
-	layers: ["lyft"], centerLat: 40.7484, centerLon: -73.9857, zoom: 16,
-	alternateWith: "lyft-group", interval: 30 } },
+	layers: ["lyft"], centerLat: 40.7484, centerLon: -73.9857, zoom: 16 } },
 ```
 
 `node find-station.js --address "..."` prints your coordinates for `centerLat` / `centerLon`.
