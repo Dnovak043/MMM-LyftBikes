@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /* Find your station's exact name / id.
  *
- *   node find-station.js "Broadway"                # search Bay Wheels by name
- *   node find-station.js --address "350 5th Ave, New York, NY"   # 10 closest to your address
- *   node find-station.js --near 40.7484,-73.9857  # 10 closest stations to a lat,lon
+ *   node find-station.js "Market St"               # search Bay Wheels by name
+ *   node find-station.js --address "1 Ferry Building, San Francisco, CA"   # 10 closest to your address
+ *   node find-station.js --near 37.7955,-122.3937  # 10 closest stations to a lat,lon
  *   node find-station.js --system bkn "Bedford"    # other Lyft systems (bkn = Citi Bike, chi = Divvy, ...)
  */
 
@@ -23,7 +23,7 @@ async function main () {
 		else if (args[i] === "--base-url") baseUrl = args[++i];
 		else if (args[i] === "--address") address = args.slice(i + 1).join(" "), i = args.length;
 		else if (args[i] === "--near") {
-			// Accept "40.75,-73.99", "40.75, -73.99" (Google Maps copies it with a space), or "40.75 -73.99"
+			// Accept "37.80,-122.39", "37.80, -122.39" (Google Maps copies it with a space), or "37.80 -122.39"
 			const parts = [];
 			while (i + 1 < args.length && /^[-+\d.,\s°NSEW]+$/i.test(args[i + 1]) && !args[i + 1].startsWith("--")) parts.push(args[++i]);
 			near = parts.join(" ");
@@ -32,8 +32,8 @@ async function main () {
 	const query = terms.join(" ").trim().toLowerCase();
 	if (!query && near === null && !address) {
 		console.log("Usage:");
-		console.log('  node find-station.js --address "350 5th Ave, New York, NY"');
-		console.log("  node find-station.js --near 40.7484,-73.9857");
+		console.log('  node find-station.js --address "1 Ferry Building, San Francisco, CA"');
+		console.log("  node find-station.js --near 37.7955,-122.3937");
 		console.log('  node find-station.js "part of station name"');
 		process.exit(1);
 	}
@@ -43,7 +43,7 @@ async function main () {
 		const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(address);
 		const hits = await getJson(url);
 		if (!hits.length) {
-			console.log(`Couldn't find "${address}". Try adding the city and state, e.g. "350 5th Ave, New York, NY".`);
+			console.log(`Couldn't find "${address}". Try adding the city and state, e.g. "1 Ferry Building, San Francisco, CA".`);
 			process.exit(1);
 		}
 		console.log(`Address found: ${hits[0].display_name}`);
@@ -58,7 +58,7 @@ async function main () {
 	if (near !== null) {
 		const nums = (near.match(/[-+]?\d+(?:\.\d+)?/g) || []).map(Number);
 		if (nums.length !== 2) {
-			console.log(`Couldn't read "${near}" as coordinates. Use: --near 40.7484,-73.9857`);
+			console.log(`Couldn't read "${near}" as coordinates. Use: --near 37.7955,-122.3937`);
 			process.exit(1);
 		}
 		let [lat, lon] = nums;
@@ -72,7 +72,7 @@ async function main () {
 
 		if (list.length && list[0].dist > 5000) {
 			console.log(`Heads up: the closest station is ${(list[0].dist / 1000).toFixed(0)} km away, so the coordinates are probably off.`);
-			if (system === "bay" && lon > 0) console.log("Bay Area longitudes are negative — did the minus sign get dropped? e.g. -122.0");
+			if (system === "bay" && lon > 0) console.log("Bay Area longitudes are negative — did the minus sign get dropped? e.g. -122.3937");
 			console.log("");
 		}
 	} else {

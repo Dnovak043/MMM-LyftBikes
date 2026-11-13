@@ -4,13 +4,62 @@
 
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
 const NodeHelper = require("node_helper");
 const Log = require("logger");
 const { GbfsClient } = require("./gbfs");
 
+// Remembers which Lyft station each configured station resolved to (so renames keep working and
+// removals can be explained). Small JSON file in this module's folder; safe to delete.
+const MEMORY_FILE = path.join(__dirname, "station-memory.json");
+
 module.exports = NodeHelper.create({
 	start () {
-		this.instances = new Map(); // identifier -> { config, client, timer, views }
+		this.instances = new Map(); // identifier -> { config, client, timer, views, reported }
+		try {
+			this.memory = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
+		} catch (e) {
+			this.memory = {};
+		}
+		this.memoryJson = JSON.stringify(this.memory);
+	},
+
+	saveMemory () {
+		const json = JSON.stringify(this.memory);
+		if (json === this.memoryJson) return;
+		// Only rewrite when a station's id/name/position changed, not just its "seen" time.
+		const strip = (m) => JSON.stringify(Object.fromEntries(Object.entries(m).map(([k, v]) => [k, [v.id, v.name, v.lat, v.lon]])));
+		if (strip(this.memory) === strip(JSON.parse(this.memoryJson)) && Date.now() - (this.memorySaved || 0) < 24 * 3600 * 1000) return;
+		try {
+			fs.writeFileSync(MEMORY_FILE, JSON.stringify(this.memory, null, 2));
+			this.memoryJson = json;
+			this.memorySaved = Date.now();
+		} catch (err) {
+			Log.warn(`couldn't save ${path.basename(MEMORY_FILE)}: ${err.message}`);
+		}
+	},
+
+	// Log each station problem once when it starts, and once when it's resolved (not on every refresh).
+	reportStations (instance, stations) {
+		instance.reported = instance.reported || new Map();
+		const current = new Map();
+		for (const st of stations) {
+			const issue = st.problem || st.notice;
+			if (!issue) continue;
+			const id = `${st.label}|${issue.type}`;
+			current.set(id, true);
+			if (instance.reported.has(id)) continue;
+			const list = (issue.suggestions || []).map((c) =>
+				`   ${c.name}${c.distance != null ? `  (${c.distance} m)` : ""}   id: ${c.id}`).join("\n");
+			Log.warn(issue.message + (list ? `\n${list}` : ""));
+			instance.reported.set(id, st.label);
+		}
+		for (const [id, label] of instance.reported) {
+			if (current.has(id)) continue;
+			Log.info(`"${label}" is OK again`);
+			instance.reported.delete(id);
+		}
 	},
 
 	socketNotificationReceived (notification, payload) {
@@ -46,16 +95,12 @@ module.exports = NodeHelper.create({
 		const { config, client } = instance;
 
 		try {
-			const data = await client.getStations(config.stations);
+			const data = await client.getStations(config.stations, {}, this.memory);
+			this.saveMemory();
+			this.reportStations(instance, data.stations);
 			// Use the map views as they are *now*: a map may have announced itself while we were downloading.
 			data.maps = client.stationsInViews(instance.views);
 			this.logMaps(instance, data.maps);
-			for (const st of data.stations) {
-				if (st.error && st.candidates && st.candidates.length) {
-					Log.warn(`${st.error}. Candidates:\n` +
-						st.candidates.map((c) => `   ${c.id}  ${c.name}`).join("\n"));
-				}
-			}
 			this.sendSocketNotification("LYFTBIKES_DATA", { identifier, ...data, fetchedAt: Date.now() });
 		} catch (err) {
 			Log.error(err.message);

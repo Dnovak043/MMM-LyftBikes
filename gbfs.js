@@ -39,6 +39,40 @@ function normaliseSelector (sel) {
 	return { id: sel.id || null, name: sel.name || null, label: sel.label || null };
 }
 
+/** Stable key for a configured station, used to remember which Lyft station it resolved to. */
+function selectorKey (sel) {
+	const s = normaliseSelector(sel);
+	return s.id ? `id:${s.id}` : `name:${String(s.name || "").trim().toLowerCase()}`;
+}
+
+function words (text) {
+	return String(text || "").toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean);
+}
+
+/** Station names that look like `name` (shared words), best first — for typo suggestions. */
+function similarNames (name, stationList, limit = 3) {
+	const q = words(name).filter((w) => !["st", "at", "the", "and", "of", "ave"].includes(w));
+	if (!q.length) return [];
+	return stationList
+		.map((st) => {
+			const w = new Set(words(st.name));
+			return { st, score: q.filter((x) => w.has(x)).length / q.length };
+		})
+		.filter((x) => x.score > 0)
+		.sort((a, b) => b.score - a.score)
+		.slice(0, limit)
+		.map(({ st }) => ({ id: st.station_id, name: st.name }));
+}
+
+/** The closest real (docked) stations to a point — for replacement suggestions. */
+function nearestStations (lat, lon, stationList, limit = 3) {
+	return stationList
+		.filter((st) => !/^virtual station/i.test(st.name || ""))
+		.map((st) => ({ id: st.station_id, name: st.name, distance: Math.round(distanceMeters({ lat, lon }, st)) }))
+		.sort((a, b) => a.distance - b.distance)
+		.slice(0, limit);
+}
+
 /** Find the station a selector refers to: exact id, short_name, exact name, then partial name. */
 function resolveSelector (sel, stationList) {
 	const s = normaliseSelector(sel);
@@ -119,7 +153,11 @@ class GbfsClient {
 
 	/** Returns one entry per selector: { label, name, stationId, capacity, ...counts } or { error }.
 	 *  With `views` ({ mapId: bounds }), also returns the stations inside each map's bounds. */
-	async getStations (selectors, views = {}) {
+	/** Returns one entry per selector: { label, name, stationId, ...counts } or { error, problem }.
+	 *  `memory` ({ selectorKey: { id, name, lat, lon, seen } }) remembers which Lyft station each configured
+	 *  station resolved to; it is updated in place. It lets a renamed station keep working, and lets a removed
+	 *  station be explained (with the nearest replacements). Entries may carry `problem` or `notice` for logging. */
+	async getStations (selectors, views = {}, memory = {}) {
 		await this.loadStatic();
 		const statusJson = await getJson(`${this.base}station_status.json`, this.timeoutMs);
 		const statusById = new Map(((statusJson.data && statusJson.data.stations) || []).map((s) => [s.station_id, s]));
@@ -128,22 +166,67 @@ class GbfsClient {
 		const results = [];
 		for (const raw of selectors) {
 			const sel = normaliseSelector(raw);
-			const { station, candidates } = resolveSelector(sel, this.stationList);
+			const key = selectorKey(sel);
+			const known = memory[key];
+			const wanted = sel.name || sel.id;
+			let { station, candidates } = resolveSelector(sel, this.stationList);
+			let notice = null;
+
+			// Not found by name/id, but we know which station it was: Lyft probably renamed it.
+			if (!station && !candidates.length && known) {
+				const same = this.stationList.find((st) => st.station_id === known.id);
+				if (same) {
+					station = same;
+					notice = {
+						type: "renamed",
+						message: `"${wanted}" was renamed by Lyft to "${same.name}" — still showing it. To stop relying on the old name, use { id: "${same.station_id}" } in config.js`
+					};
+				}
+			}
 
 			if (!station) {
-				results.push({
-					label: sel.label || sel.name || sel.id,
-					error: candidates.length
-						? `"${sel.name}" matches ${candidates.length} stations — use the full name or id`
-						: `Station "${sel.name || sel.id}" not found`,
-					candidates: candidates.slice(0, 10).map((c) => ({ id: c.station_id, name: c.name }))
-				});
+				let problem;
+				if (candidates.length) {
+					problem = {
+						type: "ambiguous",
+						display: `matches ${candidates.length} stations — use the full name or id`,
+						message: `"${wanted}" matches ${candidates.length} stations — use the full name or id`,
+						suggestions: candidates.slice(0, 10).map((c) => ({ id: c.station_id, name: c.name }))
+					};
+				} else if (known) {
+					const when = new Date(known.seen).toLocaleDateString("en-CA"); // local YYYY-MM-DD
+					problem = {
+						type: "removed",
+						display: "removed by Lyft",
+						message: `"${wanted}" (id ${known.id}) is no longer in Lyft's station list — Lyft removed it or took it out of service (last seen ${when}). Nearest stations to where it was:`,
+						suggestions: nearestStations(known.lat, known.lon, this.stationList)
+					};
+				} else {
+					const similar = sel.name ? similarNames(sel.name, this.stationList) : [];
+					problem = {
+						type: "unknown",
+						display: "not found",
+						message: `"${wanted}" isn't in Lyft's station list — it may have been removed or renamed, or the ${sel.name ? "name" : "id"} has a typo.${similar.length ? " Similar names:" : ""}`,
+						suggestions: similar
+					};
+				}
+				results.push({ label: sel.label || wanted, error: problem.display, problem, candidates: problem.type === "ambiguous" ? problem.suggestions : [] });
 				continue;
 			}
 
+			memory[key] = { id: station.station_id, name: station.name, lat: station.lat, lon: station.lon, seen: Date.now() };
+
 			const status = statusById.get(station.station_id);
 			if (!status) {
-				results.push({ label: sel.label || station.name, error: "No live status for this station" });
+				results.push({
+					label: sel.label || station.name,
+					error: "not reporting",
+					problem: {
+						type: "no-status",
+						display: "not reporting",
+						message: `"${station.name}" (id ${station.station_id}) is listed but Lyft isn't reporting its bikes — it may be out of service or being removed`
+					}
+				});
 				continue;
 			}
 
@@ -154,6 +237,7 @@ class GbfsClient {
 				capacity: station.capacity || null,
 				lat: station.lat,
 				lon: station.lon,
+				notice,
 				...summarise(status, this.vehicleTypes)
 			});
 		}
@@ -192,4 +276,4 @@ class GbfsClient {
 	}
 }
 
-module.exports = { GbfsClient, feedBase, getJson, resolveSelector, summarise, normaliseSelector, distanceMeters };
+module.exports = { GbfsClient, feedBase, getJson, resolveSelector, summarise, normaliseSelector, distanceMeters, selectorKey, similarNames, nearestStations };

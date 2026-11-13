@@ -25,13 +25,13 @@ Run this on the Pi (or any machine with Node 18+):
 cd ~/MagicMirror/modules/MMM-LyftBikes
 
 # the 10 closest stations to your address (looked up with OpenStreetMap)
-node find-station.js --address "350 5th Ave, New York, NY"
+node find-station.js --address "1 Ferry Building, San Francisco, CA"
 
 # or by coordinates (right-click your house in Google Maps to copy them)
-node find-station.js --near 40.7484,-73.9857
+node find-station.js --near 37.7955,-122.3937
 
 # or by part of the station name
-node find-station.js "Broadway"
+node find-station.js "Market St"
 ```
 
 It prints each station's exact name, its id, and how many bikes are there right now. Copy the name (or id) into your config.
@@ -86,7 +86,7 @@ For example:
 ```js
 { module: "MMM-LyftBikes", position: "top_left", config: { stationName: "Your Station Name" } },
 { module: "MMM-MirrorMap", position: "top_left", config: {
-	layers: ["lyft"], centerLat: 40.7484, centerLon: -73.9857, zoom: 16 } },
+	layers: ["lyft"], centerLat: 37.7955, centerLon: -122.3937, zoom: 16 } },
 ```
 
 `node find-station.js --address "..."` prints your coordinates for `centerLat` / `centerLon`.
@@ -122,6 +122,19 @@ Every key is optional. The older flat options `mapLayer`, `mapCount` and `mapCol
 | `align` | `"left"` | `"left"` or `"right"`; use `"right"` when the module sits on the right side of the mirror. |
 | `map` | `{}` | What this module sends to maps — see [the `map` block](#what-goes-to-maps-the-map-block) above. `false` = send nothing. |
 | `feedBaseUrl` | `null` | Full feed folder URL override, in case Lyft moves the feeds. |
+
+## When a station goes missing
+
+Lyft occasionally renames, removes or temporarily closes stations. The module notices and says why in the MagicMirror log (`pm2 logs MagicMirror`), once when it happens and once when it's resolved:
+
+| Shown on the mirror | Log says | What to do |
+|---|---|---|
+| (keeps working) | `"…" was renamed by Lyft to "…"` | Nothing urgent — it follows the rename. Switch that station to `{ id: "…" }` in config.js. |
+| `removed by Lyft` | `… is no longer in Lyft's station list` + the nearest stations to where it was | Pick a replacement from the list. |
+| `not found` | `… isn't in Lyft's station list` + similar names | Check the spelling, or run `node find-station.js`. |
+| `not reporting` | `… is listed but Lyft isn't reporting its bikes` | Usually temporary; wait. |
+
+To recognise renames and removals, the module remembers which Lyft station each of your stations matched, in `station-memory.json` in this folder (safe to delete; not committed to git). Using `id` instead of `name` in your config avoids rename problems altogether.
 
 ## How it works
 
