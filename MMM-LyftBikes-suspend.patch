@@ -1,0 +1,320 @@
+diff --git a/MMM-LyftBikes.js b/MMM-LyftBikes.js
+index 37c67b3..72b1028 100644
+--- a/MMM-LyftBikes.js
++++ b/MMM-LyftBikes.js
+@@ -37,6 +37,7 @@ Module.register("MMM-LyftBikes", {
+ 		stations: [],
+ 
+ 		updateInterval: 60,       // seconds (minimum 30)
++		unloadOnSuspend: false,   // when the module is hidden, also drop everything it has downloaded and drawn
+ 		showClassic: true,
+ 		showEbikes: true,
+ 		showDocks: false,         // open docks to return a bike to
+@@ -71,6 +72,8 @@ Module.register("MMM-LyftBikes", {
+ 		this.stations = null;
+ 		this.error = null;
+ 		this.mapViews = {}; // mapId -> bounds, for maps showing our layer
++		this.suspended = false;
++		this.fades = new Set(); // number changes that are mid-fade: { el, value, timer }
+ 
+ 		const stations = [...this.config.stations];
+ 		if (this.config.stationId) stations.unshift({ id: this.config.stationId });
+@@ -88,18 +91,59 @@ Module.register("MMM-LyftBikes", {
+ 		});
+ 	},
+ 
++	/* ---------- Hidden / shown by MagicMirror ---------- */
++
++	// module.hide(): stop everything. The node helper stops downloading and nothing is drawn or sent
++	// to maps until resume(). With unloadOnSuspend the downloaded data and the list are dropped too.
++	suspend () {
++		if (this.suspended || !this.selectors) return;
++		this.suspended = true;
++
++		// Finish any number that was mid-fade now, so no timer is left running.
++		for (const fade of this.fades) {
++			clearTimeout(fade.timer);
++			fade.el.textContent = fade.value;
++			fade.el.classList.remove("lb-changing");
++		}
++		this.fades.clear();
++
++		const unload = Boolean(this.config.unloadOnSuspend);
++		this.sendSocketNotification("LYFTBIKES_SUSPEND", { identifier: this.identifier, unload });
++		if (unload) {
++			this.stations = null;
++			this.error = null;
++			this.lastLayoutKey = null;
++			this.mapViews = {};
++			this.unloaded = true;
++			this.updateDom(0); // replaces the list with the small "Loading…" placeholder
++		}
++	},
++
++	// module.show(): start again with a fresh download straight away.
++	resume () {
++		if (!this.suspended) return;
++		this.suspended = false;
++		this.sendSocketNotification("LYFTBIKES_RESUME", { identifier: this.identifier, views: this.mapViews });
++		if (this.unloaded) {
++			this.unloaded = false;
++			if (this.mapConfig) this.sendNotification("MAP_VIEW_REQUEST"); // the map areas were dropped: ask again
++		}
++	},
++
+ 	/* ---------- Maps (MMM-MirrorMap) ---------- */
+ 
+ 	notificationReceived (notification, payload) {
+ 		if (!this.mapConfig || !this.selectors) return;
+ 		if (notification === "DOM_OBJECTS_CREATED") {
+-			this.sendNotification("MAP_VIEW_REQUEST"); // ask maps that started before us to re-announce
++			if (!this.suspended) this.sendNotification("MAP_VIEW_REQUEST"); // ask maps that started before us to re-announce
+ 		} else if (notification === "MAP_VIEW" && payload && payload.mapId && payload.bounds) {
++			if (this.suspended && this.config.unloadOnSuspend) return; // nothing is kept; resume() asks the maps again
+ 			const layers = Array.isArray(payload.layers) ? payload.layers : [];
+ 			if (layers.length && !layers.includes(this.mapConfig.layer)) return;
+ 			if (this.mapConfig.maps.length && !this.mapConfig.maps.includes(payload.mapId)) return; // not one of our maps
+ 			this.mapViews[payload.mapId] = payload.bounds;
+-			this.sendSocketNotification("LYFTBIKES_VIEWS", { identifier: this.identifier, views: this.mapViews });
++			// While suspended the area is only noted; resume() passes it on to the node helper.
++			if (!this.suspended) this.sendSocketNotification("LYFTBIKES_VIEWS", { identifier: this.identifier, views: this.mapViews });
+ 		}
+ 	},
+ 
+@@ -135,6 +179,7 @@ Module.register("MMM-LyftBikes", {
+ 
+ 	socketNotificationReceived (notification, payload) {
+ 		if (!payload || payload.identifier !== this.identifier) return;
++		if (this.suspended) return; // an answer that was already on its way when we were hidden
+ 		if (notification === "LYFTBIKES_DATA") {
+ 			const firstLoad = !this.stations;
+ 			const key = this.layoutKey(payload.stations);
+@@ -160,10 +205,13 @@ Module.register("MMM-LyftBikes", {
+ 
+ 	fadeText (el, value) {
+ 		el.classList.add("lb-changing");
+-		setTimeout(() => {
++		const fade = { el, value };
++		fade.timer = setTimeout(() => {
++			this.fades.delete(fade);
+ 			el.textContent = value;
+ 			el.classList.remove("lb-changing");
+ 		}, 400);
++		this.fades.add(fade);
+ 	},
+ 
+ 	// Update only the numbers that changed, fading each one out and back in.
+diff --git a/README.md b/README.md
+index 219bdc4..7104d04 100644
+--- a/README.md
++++ b/README.md
+@@ -116,6 +116,7 @@ Every key is optional. The older flat options `mapLayer`, `mapCount` and `mapCol
+ | `system` | `"bay"` | Lyft system code: `bay` (Bay Wheels), `bkn` (Citi Bike), `chi` (Divvy), `dca-cabi` (Capital Bikeshare), `pdx` (BIKETOWN), … |
+ | `language` | `"en"` | Feed language folder. |
+ | `updateInterval` | `60` | Seconds between refreshes (minimum 30). |
++| `unloadOnSuspend` | `false` | When MagicMirror hides the module, also drop everything it downloaded and drew, so nothing is kept in memory. It loads everything again when shown. |
+ | `showClassic` / `showEbikes` | `true` | Toggle each counter. |
+ | `showDocks` | `false` | Also show open docks (to return a bike). |
+ | `showStationName` | `true` | Station name (or your label) after the counts. |
+@@ -142,6 +143,12 @@ To recognise renames and removals, the module remembers which Lyft station each
+ 
+ Each refresh updates only the numbers that changed, fading each one out and back in; the rest of the module stays put. A station that isn't renting right now is shown greyed out. If a refresh fails, the mirror keeps showing the last good numbers rather than going blank. If Lyft renames your station, restart MagicMirror. If a name matches more than one station, the module says so on screen and the MagicMirror log lists the candidates and their ids.
+ 
++### When MagicMirror hides the module
++
++`module.hide()` calls `suspend()`, which stops the module completely: the node helper cancels its refresh timer and any download in progress, the browser side stops drawing and stops sending pins to maps, and answers that were already on their way are ignored. `module.show()` calls `resume()`, which downloads fresh numbers straight away and carries on at the usual interval. Pins already on a map stay as they were until then.
++
++With `unloadOnSuspend: true` the module also lets go of what it holds while hidden: the node helper forgets the downloaded station list and status, and the browser side drops its station data, the list it drew and the map areas it was told about. When shown again it starts from nothing — it says "Loading…" until the station list has been downloaded again, and asks the maps for their areas again. Your configuration and `station-memory.json` are kept.
++
+ ## Credits
+ 
+ List layout and bike icons adapted from [MMM-Bubi](https://github.com/balassy/MMM-Bubi) by György Balássy (MIT). The icons are Material Design icons (Apache 2.0).
+diff --git a/gbfs.js b/gbfs.js
+index e3f484c..d66a4e5 100644
+--- a/gbfs.js
++++ b/gbfs.js
+@@ -9,9 +9,15 @@ function feedBase (system, language = "en") {
+ 	return `https://gbfs.lyft.com/gbfs/2.3/${system}/${language}/`;
+ }
+ 
+-async function getJson (url, timeoutMs = 15000) {
++/** `signal` (optional) cancels the download from outside, e.g. when the module is suspended. */
++async function getJson (url, timeoutMs = 15000, signal = null) {
+ 	const controller = new AbortController();
+ 	const timer = setTimeout(() => controller.abort(), timeoutMs);
++	const cancel = () => controller.abort();
++	if (signal) {
++		if (signal.aborted) cancel();
++		else signal.addEventListener("abort", cancel, { once: true });
++	}
+ 	try {
+ 		const res = await fetch(url, {
+ 			signal: controller.signal,
+@@ -21,6 +27,7 @@ async function getJson (url, timeoutMs = 15000) {
+ 		return await res.json();
+ 	} finally {
+ 		clearTimeout(timer);
++		if (signal) signal.removeEventListener("abort", cancel);
+ 	}
+ }
+ 
+@@ -137,18 +144,37 @@ class GbfsClient {
+ 		this.stationList = [];
+ 		this.vehicleTypes = new Map();
+ 		this.statusById = null; // latest station_status, kept so new map views can be answered without a new download
++		this.aborter = new AbortController(); // cancels the downloads in progress, see cancel()
++	}
++
++	/** Stop any download in progress. The getStations() call that was waiting on it rejects. */
++	cancel () {
++		this.aborter.abort();
++		this.aborter = new AbortController();
++	}
++
++	/** Forget everything downloaded so far; the next getStations() starts from nothing. */
++	unload () {
++		this.cancel();
++		this.stationList = [];
++		this.vehicleTypes = new Map();
++		this.statusById = null;
+ 	}
+ 
+-	async loadStatic () {
++	async loadStatic (signal = this.aborter.signal) {
+ 		if (this.stationList.length) return; // loaded once at startup
+-		const info = await getJson(`${this.base}station_information.json`, this.timeoutMs);
+-		this.stationList = (info.data && info.data.stations) || [];
++		const info = await getJson(`${this.base}station_information.json`, this.timeoutMs, signal);
++		const stationList = (info.data && info.data.stations) || [];
++		let vehicleTypes;
+ 		try {
+-			const vt = await getJson(`${this.base}vehicle_types.json`, this.timeoutMs);
+-			this.vehicleTypes = new Map(((vt.data && vt.data.vehicle_types) || []).map((t) => [t.vehicle_type_id, t]));
++			const vt = await getJson(`${this.base}vehicle_types.json`, this.timeoutMs, signal);
++			vehicleTypes = new Map(((vt.data && vt.data.vehicle_types) || []).map((t) => [t.vehicle_type_id, t]));
+ 		} catch (e) {
+-			this.vehicleTypes = new Map(); // optional feed; fall back to num_* counters
++			if (signal.aborted) throw e; // cancelled, not missing: load both again next time
++			vehicleTypes = new Map(); // optional feed; fall back to num_* counters
+ 		}
++		this.stationList = stationList;
++		this.vehicleTypes = vehicleTypes;
+ 	}
+ 
+ 	/** Returns one entry per selector: { label, name, stationId, capacity, ...counts } or { error }.
+@@ -158,8 +184,10 @@ class GbfsClient {
+ 	 *  station resolved to; it is updated in place. It lets a renamed station keep working, and lets a removed
+ 	 *  station be explained (with the nearest replacements). Entries may carry `problem` or `notice` for logging. */
+ 	async getStations (selectors, views = {}, memory = {}) {
+-		await this.loadStatic();
+-		const statusJson = await getJson(`${this.base}station_status.json`, this.timeoutMs);
++		const signal = this.aborter.signal; // one signal for the whole refresh, so cancel() stops every step
++		await this.loadStatic(signal);
++		const statusJson = await getJson(`${this.base}station_status.json`, this.timeoutMs, signal);
++		if (signal.aborted) throw new Error("cancelled");
+ 		const statusById = new Map(((statusJson.data && statusJson.data.stations) || []).map((s) => [s.station_id, s]));
+ 		this.statusById = statusById;
+ 
+diff --git a/node_helper.js b/node_helper.js
+index 2dd9f11..e0c2135 100644
+--- a/node_helper.js
++++ b/node_helper.js
+@@ -1,5 +1,6 @@
+ /* MMM-LyftBikes — node helper
+  * Fetches GBFS data server-side and pushes it to each module instance.
++ * While an instance is suspended (hidden on the mirror) nothing runs for it: no timer, no download.
+  */
+ 
+ "use strict";
+@@ -16,7 +17,7 @@ const MEMORY_FILE = path.join(__dirname, "station-memory.json");
+ 
+ module.exports = NodeHelper.create({
+ 	start () {
+-		this.instances = new Map(); // identifier -> { config, client, timer, views, reported }
++		this.instances = new Map(); // identifier -> { config, client, timer, views, reported, suspended }
+ 		try {
+ 			this.memory = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
+ 		} catch (e) {
+@@ -66,19 +67,43 @@ module.exports = NodeHelper.create({
+ 		if (notification === "LYFTBIKES_CONFIG") {
+ 			const { identifier, config } = payload;
+ 			const existing = this.instances.get(identifier);
+-			if (existing) clearTimeout(existing.timer);
++			if (existing) {
++				clearTimeout(existing.timer);
++				existing.client.cancel(); // it is being replaced: stop its download too
++			}
+ 
+ 			const client = new GbfsClient({
+ 				system: config.system,
+ 				language: config.language,
+ 				baseUrl: config.feedBaseUrl
+ 			});
+-			this.instances.set(identifier, { config, client, timer: null, views: existing ? existing.views : {} });
++			this.instances.set(identifier, { config, client, timer: null, views: existing ? existing.views : {}, suspended: false });
+ 			this.poll(identifier);
++		} else if (notification === "LYFTBIKES_SUSPEND") {
++			// The module was hidden: stop its timer and the download in progress. Nothing runs until it resumes.
++			const instance = this.instances.get(payload.identifier);
++			if (!instance || instance.suspended) return;
++			instance.suspended = true;
++			clearTimeout(instance.timer);
++			instance.timer = null;
++			instance.client.cancel();
++			if (payload.unload) {
++				// unloadOnSuspend: also forget the downloaded station list and status, and the map areas.
++				instance.client.unload();
++				instance.views = {};
++				instance.logged = new Set();
++			}
++		} else if (notification === "LYFTBIKES_RESUME") {
++			// The module is shown again: refresh now, then carry on at the usual interval.
++			const instance = this.instances.get(payload.identifier);
++			if (!instance || !instance.suspended) return;
++			instance.suspended = false;
++			instance.views = payload.views || {};
++			this.poll(payload.identifier);
+ 		} else if (notification === "LYFTBIKES_VIEWS") {
+ 			// A map announced (or changed) its view: answer straight away from the last download.
+ 			const instance = this.instances.get(payload.identifier);
+-			if (!instance) return;
++			if (!instance || instance.suspended) return;
+ 			instance.views = payload.views || {};
+ 			instance.logged = new Set(); // log each map's station count again for its new area
+ 			if (instance.client.statusById) {
+@@ -91,11 +116,15 @@ module.exports = NodeHelper.create({
+ 
+ 	async poll (identifier) {
+ 		const instance = this.instances.get(identifier);
+-		if (!instance) return;
++		if (!instance || instance.suspended) return;
+ 		const { config, client } = instance;
++		// This refresh no longer counts if the module was suspended, resumed or reconfigured while it downloaded.
++		const run = instance.run = (instance.run || 0) + 1;
++		const stale = () => this.instances.get(identifier) !== instance || instance.suspended || instance.run !== run;
+ 
+ 		try {
+ 			const data = await client.getStations(config.stations, {}, this.memory);
++			if (stale()) return;
+ 			this.saveMemory();
+ 			this.reportStations(instance, data.stations);
+ 			// Use the map views as they are *now*: a map may have announced itself while we were downloading.
+@@ -103,6 +132,7 @@ module.exports = NodeHelper.create({
+ 			this.logMaps(instance, data.maps);
+ 			this.sendSocketNotification("LYFTBIKES_DATA", { identifier, ...data, fetchedAt: Date.now() });
+ 		} catch (err) {
++			if (stale()) return; // cancelled by a suspend: not an error
+ 			Log.error(err.message);
+ 			this.sendSocketNotification("LYFTBIKES_ERROR", { identifier, message: err.message });
+ 		}
+@@ -124,6 +154,9 @@ module.exports = NodeHelper.create({
+ 	},
+ 
+ 	stop () {
+-		for (const inst of this.instances.values()) clearTimeout(inst.timer);
++		for (const inst of this.instances.values()) {
++			clearTimeout(inst.timer);
++			inst.client.cancel();
++		}
+ 	}
+ });

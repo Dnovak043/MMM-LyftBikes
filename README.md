@@ -116,6 +116,7 @@ Every key is optional. The older flat options `mapLayer`, `mapCount` and `mapCol
 | `system` | `"bay"` | Lyft system code: `bay` (Bay Wheels), `bkn` (Citi Bike), `chi` (Divvy), `dca-cabi` (Capital Bikeshare), `pdx` (BIKETOWN), … |
 | `language` | `"en"` | Feed language folder. |
 | `updateInterval` | `60` | Seconds between refreshes (minimum 30). |
+| `unloadOnSuspend` | `false` | When MagicMirror hides the module, also drop everything it downloaded and drew, so nothing is kept in memory. It loads everything again when shown. |
 | `showClassic` / `showEbikes` | `true` | Toggle each counter. |
 | `showDocks` | `false` | Also show open docks (to return a bike). |
 | `showStationName` | `true` | Station name (or your label) after the counts. |
@@ -141,6 +142,12 @@ To recognise renames and removals, the module remembers which Lyft station each 
 `node_helper.js` fetches `station_information.json`, `vehicle_types.json` (both once, at startup) and `station_status.json` from `https://gbfs.lyft.com/gbfs/2.3/<system>/en/`, matches your station, and splits bikes into e-bike vs classic using the vehicle types. If the vehicle-type feed isn't available it falls back to `num_bikes_available − num_ebikes_available`.
 
 Each refresh updates only the numbers that changed, fading each one out and back in; the rest of the module stays put. A station that isn't renting right now is shown greyed out. If a refresh fails, the mirror keeps showing the last good numbers rather than going blank. If Lyft renames your station, restart MagicMirror. If a name matches more than one station, the module says so on screen and the MagicMirror log lists the candidates and their ids.
+
+### When MagicMirror hides the module
+
+`module.hide()` calls `suspend()`, which stops the module completely: the node helper cancels its refresh timer and any download in progress, the browser side stops drawing and stops sending pins to maps, and answers that were already on their way are ignored. `module.show()` calls `resume()`, which downloads fresh numbers straight away and carries on at the usual interval. Pins already on a map stay as they were until then.
+
+With `unloadOnSuspend: true` the module also lets go of what it holds while hidden: the node helper forgets the downloaded station list and status, and the browser side drops its station data, the list it drew and the map areas it was told about. When shown again it starts from nothing — it says "Loading…" until the station list has been downloaded again, and asks the maps for their areas again. Your configuration and `station-memory.json` are kept.
 
 ## Credits
 

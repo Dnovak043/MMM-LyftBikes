@@ -1,5 +1,6 @@
 /* MMM-LyftBikes — node helper
  * Fetches GBFS data server-side and pushes it to each module instance.
+ * While an instance is suspended (hidden on the mirror) nothing runs for it: no timer, no download.
  */
 
 "use strict";
@@ -16,7 +17,7 @@ const MEMORY_FILE = path.join(__dirname, "station-memory.json");
 
 module.exports = NodeHelper.create({
 	start () {
-		this.instances = new Map(); // identifier -> { config, client, timer, views, reported }
+		this.instances = new Map(); // identifier -> { config, client, timer, views, reported, suspended }
 		try {
 			this.memory = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
 		} catch (e) {
@@ -66,19 +67,43 @@ module.exports = NodeHelper.create({
 		if (notification === "LYFTBIKES_CONFIG") {
 			const { identifier, config } = payload;
 			const existing = this.instances.get(identifier);
-			if (existing) clearTimeout(existing.timer);
+			if (existing) {
+				clearTimeout(existing.timer);
+				existing.client.cancel(); // it is being replaced: stop its download too
+			}
 
 			const client = new GbfsClient({
 				system: config.system,
 				language: config.language,
 				baseUrl: config.feedBaseUrl
 			});
-			this.instances.set(identifier, { config, client, timer: null, views: existing ? existing.views : {} });
+			this.instances.set(identifier, { config, client, timer: null, views: existing ? existing.views : {}, suspended: false });
 			this.poll(identifier);
+		} else if (notification === "LYFTBIKES_SUSPEND") {
+			// The module was hidden: stop its timer and the download in progress. Nothing runs until it resumes.
+			const instance = this.instances.get(payload.identifier);
+			if (!instance || instance.suspended) return;
+			instance.suspended = true;
+			clearTimeout(instance.timer);
+			instance.timer = null;
+			instance.client.cancel();
+			if (payload.unload) {
+				// unloadOnSuspend: also forget the downloaded station list and status, and the map areas.
+				instance.client.unload();
+				instance.views = {};
+				instance.logged = new Set();
+			}
+		} else if (notification === "LYFTBIKES_RESUME") {
+			// The module is shown again: refresh now, then carry on at the usual interval.
+			const instance = this.instances.get(payload.identifier);
+			if (!instance || !instance.suspended) return;
+			instance.suspended = false;
+			instance.views = payload.views || {};
+			this.poll(payload.identifier);
 		} else if (notification === "LYFTBIKES_VIEWS") {
 			// A map announced (or changed) its view: answer straight away from the last download.
 			const instance = this.instances.get(payload.identifier);
-			if (!instance) return;
+			if (!instance || instance.suspended) return;
 			instance.views = payload.views || {};
 			instance.logged = new Set(); // log each map's station count again for its new area
 			if (instance.client.statusById) {
@@ -91,11 +116,15 @@ module.exports = NodeHelper.create({
 
 	async poll (identifier) {
 		const instance = this.instances.get(identifier);
-		if (!instance) return;
+		if (!instance || instance.suspended) return;
 		const { config, client } = instance;
+		// This refresh no longer counts if the module was suspended, resumed or reconfigured while it downloaded.
+		const run = instance.run = (instance.run || 0) + 1;
+		const stale = () => this.instances.get(identifier) !== instance || instance.suspended || instance.run !== run;
 
 		try {
 			const data = await client.getStations(config.stations, {}, this.memory);
+			if (stale()) return;
 			this.saveMemory();
 			this.reportStations(instance, data.stations);
 			// Use the map views as they are *now*: a map may have announced itself while we were downloading.
@@ -103,6 +132,7 @@ module.exports = NodeHelper.create({
 			this.logMaps(instance, data.maps);
 			this.sendSocketNotification("LYFTBIKES_DATA", { identifier, ...data, fetchedAt: Date.now() });
 		} catch (err) {
+			if (stale()) return; // cancelled by a suspend: not an error
 			Log.error(err.message);
 			this.sendSocketNotification("LYFTBIKES_ERROR", { identifier, message: err.message });
 		}
@@ -124,6 +154,9 @@ module.exports = NodeHelper.create({
 	},
 
 	stop () {
-		for (const inst of this.instances.values()) clearTimeout(inst.timer);
+		for (const inst of this.instances.values()) {
+			clearTimeout(inst.timer);
+			inst.client.cancel();
+		}
 	}
 });

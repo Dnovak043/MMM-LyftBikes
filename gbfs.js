@@ -9,9 +9,15 @@ function feedBase (system, language = "en") {
 	return `https://gbfs.lyft.com/gbfs/2.3/${system}/${language}/`;
 }
 
-async function getJson (url, timeoutMs = 15000) {
+/** `signal` (optional) cancels the download from outside, e.g. when the module is suspended. */
+async function getJson (url, timeoutMs = 15000, signal = null) {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const cancel = () => controller.abort();
+	if (signal) {
+		if (signal.aborted) cancel();
+		else signal.addEventListener("abort", cancel, { once: true });
+	}
 	try {
 		const res = await fetch(url, {
 			signal: controller.signal,
@@ -21,6 +27,7 @@ async function getJson (url, timeoutMs = 15000) {
 		return await res.json();
 	} finally {
 		clearTimeout(timer);
+		if (signal) signal.removeEventListener("abort", cancel);
 	}
 }
 
@@ -137,18 +144,37 @@ class GbfsClient {
 		this.stationList = [];
 		this.vehicleTypes = new Map();
 		this.statusById = null; // latest station_status, kept so new map views can be answered without a new download
+		this.aborter = new AbortController(); // cancels the downloads in progress, see cancel()
 	}
 
-	async loadStatic () {
+	/** Stop any download in progress. The getStations() call that was waiting on it rejects. */
+	cancel () {
+		this.aborter.abort();
+		this.aborter = new AbortController();
+	}
+
+	/** Forget everything downloaded so far; the next getStations() starts from nothing. */
+	unload () {
+		this.cancel();
+		this.stationList = [];
+		this.vehicleTypes = new Map();
+		this.statusById = null;
+	}
+
+	async loadStatic (signal = this.aborter.signal) {
 		if (this.stationList.length) return; // loaded once at startup
-		const info = await getJson(`${this.base}station_information.json`, this.timeoutMs);
-		this.stationList = (info.data && info.data.stations) || [];
+		const info = await getJson(`${this.base}station_information.json`, this.timeoutMs, signal);
+		const stationList = (info.data && info.data.stations) || [];
+		let vehicleTypes;
 		try {
-			const vt = await getJson(`${this.base}vehicle_types.json`, this.timeoutMs);
-			this.vehicleTypes = new Map(((vt.data && vt.data.vehicle_types) || []).map((t) => [t.vehicle_type_id, t]));
+			const vt = await getJson(`${this.base}vehicle_types.json`, this.timeoutMs, signal);
+			vehicleTypes = new Map(((vt.data && vt.data.vehicle_types) || []).map((t) => [t.vehicle_type_id, t]));
 		} catch (e) {
-			this.vehicleTypes = new Map(); // optional feed; fall back to num_* counters
+			if (signal.aborted) throw e; // cancelled, not missing: load both again next time
+			vehicleTypes = new Map(); // optional feed; fall back to num_* counters
 		}
+		this.stationList = stationList;
+		this.vehicleTypes = vehicleTypes;
 	}
 
 	/** Returns one entry per selector: { label, name, stationId, capacity, ...counts } or { error }.
@@ -158,8 +184,10 @@ class GbfsClient {
 	 *  station resolved to; it is updated in place. It lets a renamed station keep working, and lets a removed
 	 *  station be explained (with the nearest replacements). Entries may carry `problem` or `notice` for logging. */
 	async getStations (selectors, views = {}, memory = {}) {
-		await this.loadStatic();
-		const statusJson = await getJson(`${this.base}station_status.json`, this.timeoutMs);
+		const signal = this.aborter.signal; // one signal for the whole refresh, so cancel() stops every step
+		await this.loadStatic(signal);
+		const statusJson = await getJson(`${this.base}station_status.json`, this.timeoutMs, signal);
+		if (signal.aborted) throw new Error("cancelled");
 		const statusById = new Map(((statusJson.data && statusJson.data.stations) || []).map((s) => [s.station_id, s]));
 		this.statusById = statusById;
 
