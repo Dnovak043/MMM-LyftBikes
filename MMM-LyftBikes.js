@@ -37,7 +37,6 @@ Module.register("MMM-LyftBikes", {
 		stations: [],
 
 		updateInterval: 60,       // seconds (minimum 30)
-		unloadOnSuspend: false,   // when the module is hidden, also drop everything it has downloaded and drawn
 		showClassic: true,
 		showEbikes: true,
 		showDocks: false,         // open docks to return a bike to
@@ -72,8 +71,6 @@ Module.register("MMM-LyftBikes", {
 		this.stations = null;
 		this.error = null;
 		this.mapViews = {}; // mapId -> bounds, for maps showing our layer
-		this.suspended = false;
-		this.fades = new Set(); // number changes that are mid-fade: { el, value, timer }
 
 		const stations = [...this.config.stations];
 		if (this.config.stationId) stations.unshift({ id: this.config.stationId });
@@ -91,59 +88,18 @@ Module.register("MMM-LyftBikes", {
 		});
 	},
 
-	/* ---------- Hidden / shown by MagicMirror ---------- */
-
-	// module.hide(): stop everything. The node helper stops downloading and nothing is drawn or sent
-	// to maps until resume(). With unloadOnSuspend the downloaded data and the list are dropped too.
-	suspend () {
-		if (this.suspended || !this.selectors) return;
-		this.suspended = true;
-
-		// Finish any number that was mid-fade now, so no timer is left running.
-		for (const fade of this.fades) {
-			clearTimeout(fade.timer);
-			fade.el.textContent = fade.value;
-			fade.el.classList.remove("lb-changing");
-		}
-		this.fades.clear();
-
-		const unload = Boolean(this.config.unloadOnSuspend);
-		this.sendSocketNotification("LYFTBIKES_SUSPEND", { identifier: this.identifier, unload });
-		if (unload) {
-			this.stations = null;
-			this.error = null;
-			this.lastLayoutKey = null;
-			this.mapViews = {};
-			this.unloaded = true;
-			this.updateDom(0); // replaces the list with the small "Loading…" placeholder
-		}
-	},
-
-	// module.show(): start again with a fresh download straight away.
-	resume () {
-		if (!this.suspended) return;
-		this.suspended = false;
-		this.sendSocketNotification("LYFTBIKES_RESUME", { identifier: this.identifier, views: this.mapViews });
-		if (this.unloaded) {
-			this.unloaded = false;
-			if (this.mapConfig) this.sendNotification("MAP_VIEW_REQUEST"); // the map areas were dropped: ask again
-		}
-	},
-
 	/* ---------- Maps (MMM-MirrorMap) ---------- */
 
 	notificationReceived (notification, payload) {
 		if (!this.mapConfig || !this.selectors) return;
 		if (notification === "DOM_OBJECTS_CREATED") {
-			if (!this.suspended) this.sendNotification("MAP_VIEW_REQUEST"); // ask maps that started before us to re-announce
+			this.sendNotification("MAP_VIEW_REQUEST"); // ask maps that started before us to re-announce
 		} else if (notification === "MAP_VIEW" && payload && payload.mapId && payload.bounds) {
-			if (this.suspended && this.config.unloadOnSuspend) return; // nothing is kept; resume() asks the maps again
 			const layers = Array.isArray(payload.layers) ? payload.layers : [];
 			if (layers.length && !layers.includes(this.mapConfig.layer)) return;
 			if (this.mapConfig.maps.length && !this.mapConfig.maps.includes(payload.mapId)) return; // not one of our maps
 			this.mapViews[payload.mapId] = payload.bounds;
-			// While suspended the area is only noted; resume() passes it on to the node helper.
-			if (!this.suspended) this.sendSocketNotification("LYFTBIKES_VIEWS", { identifier: this.identifier, views: this.mapViews });
+			this.sendSocketNotification("LYFTBIKES_VIEWS", { identifier: this.identifier, views: this.mapViews });
 		}
 	},
 
@@ -179,7 +135,6 @@ Module.register("MMM-LyftBikes", {
 
 	socketNotificationReceived (notification, payload) {
 		if (!payload || payload.identifier !== this.identifier) return;
-		if (this.suspended) return; // an answer that was already on its way when we were hidden
 		if (notification === "LYFTBIKES_DATA") {
 			const firstLoad = !this.stations;
 			const key = this.layoutKey(payload.stations);
@@ -205,13 +160,10 @@ Module.register("MMM-LyftBikes", {
 
 	fadeText (el, value) {
 		el.classList.add("lb-changing");
-		const fade = { el, value };
-		fade.timer = setTimeout(() => {
-			this.fades.delete(fade);
+		setTimeout(() => {
 			el.textContent = value;
 			el.classList.remove("lb-changing");
 		}, 400);
-		this.fades.add(fade);
 	},
 
 	// Update only the numbers that changed, fading each one out and back in.
